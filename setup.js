@@ -52,10 +52,12 @@ async function main() {
   console.log("==========================================");
   console.log("");
 
-  const mode = await ask("Setup mode:\n  1. Groupthink account (recommended)\n  2. Self-hosted (bring your own keys)\n\nChoice (1/2): ");
+  const mode = await ask("Setup mode:\n  1. Groupthink account (recommended)\n  2. I have a Groupthink API token already\n  3. Self-hosted (bring your own keys)\n\nChoice (1/2/3): ");
 
-  if (mode.trim() === "2") {
+  if (mode.trim() === "3") {
     await selfHostedSetup();
+  } else if (mode.trim() === "2") {
+    await tokenSetup();
   } else {
     await groupthinkSetup();
   }
@@ -89,6 +91,29 @@ async function groupthinkSetup() {
 
   console.log("");
   const email = await ask("Email: ");
+
+  const hasPassword = await ask("Do you have a password? (If you signed up with Google/Microsoft, you may not) (Y/n): ");
+
+  if (hasPassword.trim().toLowerCase() === "n") {
+    console.log("");
+    console.log("┌─────────────────────────────────────────────────────────────┐");
+    console.log("│                                                             │");
+    console.log("│  If you signed up with Google or Microsoft, you'll need     │");
+    console.log("│  to set a password first:                                   │");
+    console.log("│                                                             │");
+    console.log("│    👉  https://app.groupthink.com/settings/profile          │");
+    console.log("│                                                             │");
+    console.log("│  Once you've set a password, run this setup again.          │");
+    console.log("│                                                             │");
+    console.log("│  Alternatively, if you have an API token, restart setup     │");
+    console.log("│  and choose option 2: \"I have a Groupthink API token\".      │");
+    console.log("│                                                             │");
+    console.log("└─────────────────────────────────────────────────────────────┘");
+    console.log("");
+    rl.close();
+    return;
+  }
+
   const password = await askHidden("Password: ");
 
   console.log("");
@@ -114,6 +139,9 @@ async function groupthinkSetup() {
         console.log("");
         console.log("   Forgot your password?  https://app.groupthink.com/forgot-password");
         console.log("   Need an account?       https://app.groupthink.com/register");
+        console.log("");
+        console.log("   Signed up with Google/Microsoft?");
+        console.log("   Set a password at:     https://app.groupthink.com/settings/profile");
       } else {
         console.log(`❌ Authentication failed: ${res.status} ${body}`);
       }
@@ -135,8 +163,49 @@ async function groupthinkSetup() {
   } catch (e) {
     console.log(`❌ Network error: ${e.message}`);
     console.log("");
-    console.log("If you can't reach the Groupthink API, use self-hosted mode (option 2).");
+    console.log("If you can't reach the Groupthink API, use self-hosted mode (option 3).");
     process.exit(1);
+  }
+
+  writeConfig({
+    GROUPTHINK_TOKEN: token.trim(),
+    GROUPTHINK_API,
+  });
+}
+
+async function tokenSetup() {
+  console.log("");
+  console.log("Paste your Groupthink API (Sanctum) token.");
+  console.log("You can generate one at: https://app.groupthink.com/settings/api-tokens");
+  console.log("");
+
+  const token = await askHidden("API Token: ");
+
+  if (!token.trim() || token.trim().length < 10) {
+    console.log("❌ That doesn't look like a valid token.");
+    process.exit(1);
+  }
+
+  // Verify the token works
+  console.log("");
+  console.log("🔍 Verifying token...");
+  try {
+    const res = await fetch(`${GROUPTHINK_API}/api/user`, {
+      headers: {
+        Authorization: `Bearer ${token.trim()}`,
+        Accept: "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      console.log("❌ Token verification failed. Please check your token and try again.");
+      process.exit(1);
+    }
+
+    const user = await res.json();
+    console.log(`   ✅ Authenticated as ${user.name || user.email || "user"}!`);
+  } catch (e) {
+    console.log(`   ⚠️  Couldn't verify token — continuing anyway`);
   }
 
   writeConfig({
