@@ -358,6 +358,126 @@ server.tool(
   }
 );
 
+// ── raise_hand ────────────────────────────────────────────────────────────────
+server.tool(
+  "raise_hand",
+  "Signal that you want to speak by posting a visual indicator in the meeting chat. Use when you have something to contribute but don't want to interrupt.",
+  {
+    bot_id: z.string().describe("The bot ID returned from join_meeting"),
+    topic: z.string().optional().describe("Brief topic you want to discuss (optional)"),
+  },
+  async ({ bot_id, topic }) => {
+    const bot = activeBots.get(bot_id);
+    const name = bot?.name || "Agent";
+    const message = topic
+      ? `✋ ${name} wants to speak about: ${topic}`
+      : `✋ ${name} wants to speak`;
+
+    if (isHostedMode) {
+      await groupthinApi("POST", `/bots/${bot_id}/chat`, { message });
+    } else {
+      await recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message });
+    }
+
+    return { content: [{ type: "text", text: `✋ Hand raised${topic ? `: "${topic}"` : ""}. Posted in meeting chat.` }] };
+  }
+);
+
+// ── catch_up ──────────────────────────────────────────────────────────────────
+server.tool(
+  "catch_up",
+  "Get a summary of everything discussed in the meeting so far. Use when you join late or need to recap what happened.",
+  {
+    bot_id: z.string().describe("The bot ID returned from join_meeting"),
+  },
+  async ({ bot_id }) => {
+    let transcript;
+
+    if (isHostedMode) {
+      const { ok, data } = await groupthinApi("GET", `/bots/${bot_id}/transcript`);
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to get transcript for catch-up.` }] };
+      }
+      transcript = Array.isArray(data) ? data : data.transcript || [];
+    } else {
+      const { ok, data } = await recallApi("GET", `/bot/${bot_id}/transcript/`);
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to get transcript for catch-up.` }] };
+      }
+      transcript = Array.isArray(data) ? data : [];
+    }
+
+    if (transcript.length === 0) {
+      return { content: [{ type: "text", text: "No transcript yet — the meeting may have just started or the bot isn't recording yet." }] };
+    }
+
+    // Format full transcript for the agent to summarize
+    const lines = transcript.map((entry) => {
+      const speaker = entry.speaker || "Unknown";
+      const text = entry.words?.map((w) => w.text).join(" ") || "";
+      return `${speaker}: ${text}`;
+    });
+
+    // Update cursor so get_transcript doesn't repeat these
+    const bot = activeBots.get(bot_id);
+    if (bot) {
+      const last = transcript[transcript.length - 1];
+      const lastWord = last.words?.[last.words.length - 1];
+      if (lastWord) {
+        bot.lastTranscriptTs = lastWord.end_timestamp;
+      }
+    }
+
+    const totalMinutes = transcript.length > 0
+      ? ((transcript[transcript.length - 1].words?.slice(-1)[0]?.end_timestamp || 0) / 60).toFixed(1)
+      : "0";
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `📋 Meeting transcript so far (${totalMinutes} min, ${transcript.length} segments):\n\n${lines.join("\n")}\n\nUse this to understand context. Summarize for yourself, then participate.`,
+        },
+      ],
+    };
+  }
+);
+
+// ── save_notes ────────────────────────────────────────────────────────────────
+server.tool(
+  "save_notes",
+  "Save your meeting notes and observations. Call this before leaving to persist what you learned.",
+  {
+    bot_id: z.string().describe("The bot ID returned from join_meeting"),
+    summary: z.string().describe("Your summary of the meeting"),
+    action_items: z.array(z.string()).optional().describe("Action items you identified"),
+    key_decisions: z.array(z.string()).optional().describe("Key decisions that were made"),
+  },
+  async ({ bot_id, summary, action_items, key_decisions }) => {
+    if (isHostedMode) {
+      const { ok, data } = await groupthinApi("POST", `/bots/${bot_id}/notes`, {
+        summary,
+        action_items: action_items || [],
+        key_decisions: key_decisions || [],
+      });
+      if (!ok) {
+        // Fallback: post in chat if API doesn't support notes yet
+        const noteText = `📝 Meeting Notes:\n${summary}${action_items?.length ? "\n\nAction Items:\n" + action_items.map((i) => `• ${i}`).join("\n") : ""}${key_decisions?.length ? "\n\nDecisions:\n" + key_decisions.map((d) => `• ${d}`).join("\n") : ""}`;
+        await (isHostedMode
+          ? groupthinApi("POST", `/bots/${bot_id}/chat`, { message: noteText })
+          : recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message: noteText }));
+        return { content: [{ type: "text", text: `📝 Notes saved to meeting chat (API notes endpoint not available yet).` }] };
+      }
+      return { content: [{ type: "text", text: `📝 Notes saved! Summary: "${summary.substring(0, 80)}..."` }] };
+    }
+
+    // Self-hosted: post notes in meeting chat
+    const noteText = `📝 Meeting Notes:\n${summary}${action_items?.length ? "\n\nAction Items:\n" + action_items.map((i) => `• ${i}`).join("\n") : ""}${key_decisions?.length ? "\n\nDecisions:\n" + key_decisions.map((d) => `• ${d}`).join("\n") : ""}`;
+    await recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message: noteText });
+    return { content: [{ type: "text", text: `📝 Notes posted in meeting chat.` }] };
+  }
+);
+
 // ── Start server ──────────────────────────────────────────────────────────────
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -68,6 +68,9 @@ Each brings its own project context. Each has a separate voice and identity in t
 | `get_transcript` | Get new speech since last check |
 | `speak` | Say something out loud via text-to-speech |
 | `send_chat` | Post a message in the meeting chat |
+| `raise_hand` | Signal you want to speak (posts ✋ in chat) |
+| `catch_up` | Get full transcript so far (for late joiners) |
+| `save_notes` | Save meeting notes, action items, and decisions |
 | `bot_status` | Check if the bot has been admitted |
 | `leave_meeting` | Remove the bot from the meeting |
 
