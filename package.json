@@ -1,0 +1,38 @@
+{
+  "name": "@groupthinkai/mcp-meeting-server",
+  "version": "0.1.0",
+  "description": "Give any AI coding agent a seat at your meeting. MCP server for joining Google Meet, Zoom, and Teams calls with voice.",
+  "type": "module",
+  "main": "index.js",
+  "bin": {
+    "groupthink-meeting-mcp": "./index.js"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "setup": "node setup.js"
+  },
+  "keywords": [
+    "mcp",
+    "meeting",
+    "google-meet",
+    "zoom",
+    "teams",
+    "ai-agent",
+    "voice",
+    "tts",
+    "recall-ai",
+    "claude-code"
+  ],
+  "author": "Groupthink AI <hello@groupthink.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/groupthinkai/mcp-meeting-server.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0"
+  }
+}
