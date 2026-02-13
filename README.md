@@ -115,9 +115,30 @@ Included with your Groupthink plan. See [groupthink.com/pricing](https://groupth
 
 ## Supported Platforms
 
-**Meetings:** Google Meet ✅ · Zoom ✅ · Microsoft Teams ✅
+### Meeting Platforms
+| Platform | Status |
+|----------|--------|
+| Google Meet | ✅ Supported |
+| Zoom | ✅ Supported |
+| Microsoft Teams | ✅ Supported |
 
-**AI Clients:** Claude Code ✅ · Cursor ✅ · Windsurf ✅ · Any MCP stdio client ✅
+### AI Coding Assistants
+Works with any tool that supports the [Model Context Protocol (MCP)](https://modelcontextprotocol.io):
+
+| Client | Type | MCP Support |
+|--------|------|-------------|
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | CLI agent | ✅ Built-in (`/mcp add`) |
+| [OpenClaw](https://openclaw.ai) | Autonomous agent | ✅ Built-in |
+| [Codex CLI](https://github.com/openai/codex) | CLI agent | ✅ Via config |
+| [Cursor](https://cursor.com) | IDE | ✅ Built-in |
+| [Windsurf](https://codeium.com/windsurf) | IDE | ✅ Built-in |
+| [Cline](https://github.com/cline/cline) | VS Code extension | ✅ Built-in |
+| [Continue](https://continue.dev) | IDE extension | ✅ Built-in |
+| [Zed](https://zed.dev) | Editor | ✅ Built-in |
+| [Sourcegraph Amp](https://sourcegraph.com) | Code AI | ✅ Built-in |
+| [GitHub Copilot](https://github.com/features/copilot) | IDE extension | ✅ Via MCP registry |
+
+> **Any MCP-compatible client works.** If your tool supports MCP stdio servers, it can join meetings. See the [MCP clients list](https://modelcontextprotocol.io/clients) for the full ecosystem.
 
 ## Self-Hosted Mode
 
