@@ -4,25 +4,67 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+// Auth: either direct keys (self-hosted) or Groupthink API token (hosted)
+const GROUPTHINK_TOKEN = process.env.GROUPTHINK_TOKEN;
+const GROUPTHINK_API = process.env.GROUPTHINK_API || "https://app.groupthink.com";
+
+// Direct mode (self-hosted, no Groupthink account needed)
 const RECALL_TOKEN = process.env.RECALL_TOKEN || process.env.RECALLAI_TOKEN;
 const OPENAI_KEY = process.env.OPENAI_KEY || process.env.OPENAI_API_KEY;
 
-if (!RECALL_TOKEN) {
-  console.error("RECALL_TOKEN environment variable required");
-  process.exit(1);
-}
-if (!OPENAI_KEY) {
-  console.error("OPENAI_KEY environment variable required");
+const isHostedMode = !!GROUPTHINK_TOKEN;
+const isDirectMode = !isHostedMode && RECALL_TOKEN && OPENAI_KEY;
+
+if (!isHostedMode && !isDirectMode) {
+  console.error(
+    "Authentication required. Either:\n" +
+      "  - Set GROUPTHINK_TOKEN (recommended)\n" +
+      "  - Or set both RECALL_TOKEN and OPENAI_KEY (self-hosted)\n"
+  );
   process.exit(1);
 }
 
 // Track active bots and transcript cursors
-const activeBots = new Map(); // botId -> { name, meetingUrl, lastTranscriptTs }
+const activeBots = new Map();
 
 const server = new McpServer({
   name: "groupthink-meeting",
-  version: "0.1.0",
+  version: "0.2.0",
 });
+
+// ── API helpers ───────────────────────────────────────────────────────────────
+
+async function groupthinApi(method, path, body) {
+  const res = await fetch(`${GROUPTHINK_API}/api/v1/mcp${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${GROUPTHINK_TOKEN}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  return { ok: res.ok, status: res.status, data };
+}
+
+async function recallApi(method, path, body) {
+  const opts = {
+    method,
+    headers: {
+      Authorization: `Token ${RECALL_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+  };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(`https://api.recall.ai/api/v1${path}`, opts);
+  const text = await res.text();
+  let data;
+  try { data = JSON.parse(text); } catch { data = { raw: text }; }
+  return { ok: res.ok, status: res.status, data };
+}
 
 // ── join_meeting ──────────────────────────────────────────────────────────────
 server.tool(
@@ -41,18 +83,24 @@ server.tool(
       url = `https://meet.google.com/${url}`;
     }
 
-    const res = await fetch("https://api.recall.ai/api/v1/bot/", {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${RECALL_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+    let botId;
+
+    if (isHostedMode) {
+      const { ok, status, data } = await groupthinApi("POST", "/bots", {
+        meeting_url: url,
+        bot_name,
+      });
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to create bot: ${status} ${JSON.stringify(data)}` }] };
+      }
+      botId = data.bot_id;
+    } else {
+      const { ok, status, data } = await recallApi("POST", "/bot/", {
         bot_name,
         meeting_url: url,
         transcription_options: { provider: "deepgram" },
         real_time_transcription: {
-          destination_url: "https://groupthink-elle.ngrok.app/webhooks/v1/recall/transcription",
+          destination_url: (process.env.RECALL_WEBHOOK_URL || "https://groupthink-elle.ngrok.app/webhooks/v1/recall") + "/transcription",
           partial_results: false,
         },
         chat: {
@@ -61,22 +109,17 @@ server.tool(
             message: `👋 ${bot_name} has joined the meeting.`,
           },
         },
-      }),
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      return { content: [{ type: "text", text: `Failed to create bot: ${res.status} ${body}` }] };
+      });
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to create bot: ${status} ${JSON.stringify(data)}` }] };
+      }
+      botId = data.id;
     }
-
-    const data = await res.json();
-    const botId = data.id;
 
     activeBots.set(botId, {
       name: bot_name,
       meetingUrl: url,
       lastTranscriptTs: null,
-      transcriptBuffer: [],
     });
 
     return {
@@ -110,16 +153,21 @@ server.tool(
       return { content: [{ type: "text", text: `Unknown bot ID: ${bot_id}. Call join_meeting first.` }] };
     }
 
-    const res = await fetch(`https://api.recall.ai/api/v1/bot/${bot_id}/transcript/`, {
-      headers: { Authorization: `Token ${RECALL_TOKEN}` },
-    });
+    let transcript;
 
-    if (!res.ok) {
-      const body = await res.text();
-      return { content: [{ type: "text", text: `Failed to get transcript: ${res.status} ${body}` }] };
+    if (isHostedMode) {
+      const { ok, data } = await groupthinApi("GET", `/bots/${bot_id}/transcript`);
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to get transcript: ${JSON.stringify(data)}` }] };
+      }
+      transcript = Array.isArray(data) ? data : data.transcript || [];
+    } else {
+      const { ok, data } = await recallApi("GET", `/bot/${bot_id}/transcript/`);
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to get transcript: ${JSON.stringify(data)}` }] };
+      }
+      transcript = Array.isArray(data) ? data : [];
     }
-
-    const transcript = await res.json();
 
     // Filter to new entries since last check
     const lastTs = bot.lastTranscriptTs;
@@ -127,7 +175,6 @@ server.tool(
 
     if (lastTs !== null) {
       newEntries = transcript.filter((entry) => {
-        // Each entry has words with start/end timestamps
         const entryTime = entry.words?.[entry.words.length - 1]?.end_timestamp;
         return entryTime && entryTime > lastTs;
       });
@@ -176,19 +223,25 @@ server.tool(
     voice: z.enum(["alloy", "echo", "fable", "onyx", "nova", "shimmer"]).default("nova").describe("TTS voice"),
   },
   async ({ bot_id, text, voice }) => {
-    // 1. Generate TTS audio
+    if (isHostedMode) {
+      const { ok, data } = await groupthinApi("POST", `/bots/${bot_id}/speak`, { text, voice });
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to speak: ${JSON.stringify(data)}` }] };
+      }
+      const est = data.estimated_duration || (text.length * 0.065).toFixed(1);
+      return {
+        content: [{ type: "text", text: `🔊 Spoke: "${text}" (est. ${est}s). Wait ${Math.ceil(parseFloat(est) + 2)}s before speaking again.` }],
+      };
+    }
+
+    // Direct mode: TTS + push audio
     const ttsRes = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${OPENAI_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: "tts-1",
-        input: text,
-        voice: voice,
-        speed: 1.0,
-      }),
+      body: JSON.stringify({ model: "tts-1", input: text, voice, speed: 1.0 }),
     });
 
     if (!ttsRes.ok) {
@@ -198,22 +251,13 @@ server.tool(
     const audioBuffer = await ttsRes.arrayBuffer();
     const b64Audio = Buffer.from(audioBuffer).toString("base64");
 
-    // 2. Push audio to Recall bot
-    const pushRes = await fetch(`https://api.recall.ai/api/v1/bot/${bot_id}/output_audio/`, {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${RECALL_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        kind: "mp3",
-        b64_data: b64Audio,
-      }),
+    const pushRes = await recallApi("POST", `/bot/${bot_id}/output_audio/`, {
+      kind: "mp3",
+      b64_data: b64Audio,
     });
 
     if (!pushRes.ok) {
-      const body = await pushRes.text();
-      return { content: [{ type: "text", text: `Failed to push audio: ${pushRes.status} ${body}` }] };
+      return { content: [{ type: "text", text: `Failed to push audio: ${pushRes.status} ${JSON.stringify(pushRes.data)}` }] };
     }
 
     const estimatedDuration = (text.length * 0.065).toFixed(1);
@@ -237,18 +281,16 @@ server.tool(
     message: z.string().describe("Message to post in meeting chat"),
   },
   async ({ bot_id, message }) => {
-    const res = await fetch(`https://api.recall.ai/api/v1/bot/${bot_id}/send_chat_message/`, {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${RECALL_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ message }),
-    });
-
-    if (!res.ok) {
-      const body = await res.text();
-      return { content: [{ type: "text", text: `Failed to send chat: ${res.status} ${body}` }] };
+    if (isHostedMode) {
+      const { ok, data } = await groupthinApi("POST", `/bots/${bot_id}/chat`, { message });
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to send chat: ${JSON.stringify(data)}` }] };
+      }
+    } else {
+      const { ok, data } = await recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message });
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to send chat: ${JSON.stringify(data)}` }] };
+      }
     }
 
     return { content: [{ type: "text", text: `💬 Sent in meeting chat: "${message}"` }] };
@@ -263,21 +305,13 @@ server.tool(
     bot_id: z.string().describe("The bot ID returned from join_meeting"),
   },
   async ({ bot_id }) => {
-    const res = await fetch(`https://api.recall.ai/api/v1/bot/${bot_id}/leave_call/`, {
-      method: "POST",
-      headers: {
-        Authorization: `Token ${RECALL_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-    });
-
-    activeBots.delete(bot_id);
-
-    if (!res.ok) {
-      const body = await res.text();
-      return { content: [{ type: "text", text: `Failed to leave: ${res.status} ${body}` }] };
+    if (isHostedMode) {
+      await groupthinApi("POST", `/bots/${bot_id}/leave`);
+    } else {
+      await recallApi("POST", `/bot/${bot_id}/leave_call/`);
     }
 
+    activeBots.delete(bot_id);
     return { content: [{ type: "text", text: `👋 Bot left the meeting.` }] };
   }
 );
@@ -290,15 +324,26 @@ server.tool(
     bot_id: z.string().describe("The bot ID returned from join_meeting"),
   },
   async ({ bot_id }) => {
-    const res = await fetch(`https://api.recall.ai/api/v1/bot/${bot_id}/`, {
-      headers: { Authorization: `Token ${RECALL_TOKEN}` },
-    });
-
-    if (!res.ok) {
-      return { content: [{ type: "text", text: `Failed to check status: ${res.status}` }] };
+    if (isHostedMode) {
+      const { ok, data } = await groupthinApi("GET", `/bots/${bot_id}/status`);
+      if (!ok) {
+        return { content: [{ type: "text", text: `Failed to check status: ${JSON.stringify(data)}` }] };
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Bot "${data.bot_name}" — Status: ${data.status}\nMeeting: ${data.meeting_url}\nCreated: ${data.created_at}`,
+          },
+        ],
+      };
     }
 
-    const data = await res.json();
+    const { ok, data } = await recallApi("GET", `/bot/${bot_id}/`);
+    if (!ok) {
+      return { content: [{ type: "text", text: `Failed to check status: ${JSON.stringify(data)}` }] };
+    }
+
     const statuses = data.status_changes || [];
     const latest = statuses[statuses.length - 1];
 
@@ -306,9 +351,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: `Bot "${data.bot_name}" — Status: ${latest?.code || "unknown"}\n` +
-            `Meeting: ${data.meeting_url}\n` +
-            `Created: ${data.created_at}`,
+          text: `Bot "${data.bot_name}" — Status: ${latest?.code || "unknown"}\nMeeting: ${data.meeting_url}\nCreated: ${data.created_at}`,
         },
       ],
     };
