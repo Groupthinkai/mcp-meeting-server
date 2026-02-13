@@ -97,7 +97,7 @@ async function groupthinkSetup() {
   // Get Sanctum token via login
   let token;
   try {
-    const res = await fetch(`${GROUPTHINK_API}/api/v1/auth/token`, {
+    const res = await fetch(`${GROUPTHINK_API}/api/login/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({
@@ -120,12 +120,17 @@ async function groupthinkSetup() {
       process.exit(1);
     }
 
-    const data = await res.json();
-    token = data.token || data.plainTextToken || data;
-    if (typeof token !== "string") {
-      // Some Laravel Sanctum setups return the token differently
-      token = data.data?.token || data.data?.plainTextToken || JSON.stringify(data);
+    // Sanctum tokenExchangeLogin returns the plain text token directly
+    const responseText = await res.text();
+    // Token may be returned as a raw string (with quotes) or as JSON
+    token = responseText.replace(/^"|"$/g, "").trim();
+
+    if (!token || token.length < 10) {
+      console.log("❌ Got an unexpected response from the server.");
+      console.log(`   Response: ${responseText.substring(0, 100)}`);
+      process.exit(1);
     }
+
     console.log("   ✅ Authenticated!");
   } catch (e) {
     console.log(`❌ Network error: ${e.message}`);
