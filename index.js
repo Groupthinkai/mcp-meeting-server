@@ -32,6 +32,32 @@ const server = new McpServer({
   version: "0.2.0",
 });
 
+// ── Timeout & error helpers ──────────────────────────────────────────────────
+
+const RECALL_TIMEOUT = 30_000;
+const TTS_TIMEOUT = 60_000;
+
+function timeoutSignal(ms) {
+  return AbortSignal.timeout(ms);
+}
+
+function humanRecallError(status, data) {
+  const detail = data?.detail || data?.error || JSON.stringify(data);
+  switch (status) {
+    case 401: return `Authentication failed — check your Recall token or Groupthink login (${detail})`;
+    case 403: return `Not authorized for this bot (${detail})`;
+    case 404: return `Bot not found — it may have already left the meeting (${detail})`;
+    case 429: return `Rate limited — wait a moment and try again`;
+    default:
+      if (status >= 500) return `Recall.ai service error — try again in a few seconds (${status})`;
+      return `Recall API error ${status}: ${detail}`;
+  }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 // ── API helpers ───────────────────────────────────────────────────────────────
 
 async function groupthinApi(method, path, body) {
@@ -43,6 +69,7 @@ async function groupthinApi(method, path, body) {
       Accept: "application/json",
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal: timeoutSignal(RECALL_TIMEOUT),
   });
   const text = await res.text();
   let data;
@@ -57,6 +84,7 @@ async function recallApi(method, path, body) {
       Authorization: `Token ${RECALL_TOKEN}`,
       "Content-Type": "application/json",
     },
+    signal: timeoutSignal(RECALL_TIMEOUT),
   };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(`https://api.recall.ai/api/v1${path}`, opts);
@@ -64,6 +92,10 @@ async function recallApi(method, path, body) {
   let data;
   try { data = JSON.parse(text); } catch { data = { raw: text }; }
   return { ok: res.ok, status: res.status, data };
+}
+
+function formatApiError(label, status, data) {
+  return `${label}: ${humanRecallError(status, data)}`;
 }
 
 // ── join_meeting ──────────────────────────────────────────────────────────────
@@ -91,7 +123,7 @@ server.tool(
         bot_name,
       });
       if (!ok) {
-        return { content: [{ type: "text", text: `Failed to create bot: ${status} ${JSON.stringify(data)}` }] };
+        return { content: [{ type: "text", text: formatApiError("Failed to create bot", status, data) }] };
       }
       botId = data.bot_id;
     } else {
@@ -111,7 +143,7 @@ server.tool(
         },
       });
       if (!ok) {
-        return { content: [{ type: "text", text: `Failed to create bot: ${status} ${JSON.stringify(data)}` }] };
+        return { content: [{ type: "text", text: formatApiError("Failed to create bot", status, data) }] };
       }
       botId = data.id;
     }
@@ -156,15 +188,15 @@ server.tool(
     let transcript;
 
     if (isHostedMode) {
-      const { ok, data } = await groupthinApi("GET", `/bots/${bot_id}/transcript`);
+      const { ok, status, data } = await groupthinApi("GET", `/bots/${bot_id}/transcript`);
       if (!ok) {
-        return { content: [{ type: "text", text: `Failed to get transcript: ${JSON.stringify(data)}` }] };
+        return { content: [{ type: "text", text: formatApiError("Failed to get transcript", status, data) }] };
       }
       transcript = Array.isArray(data) ? data : data.transcript || [];
     } else {
-      const { ok, data } = await recallApi("GET", `/bot/${bot_id}/transcript/`);
+      const { ok, status, data } = await recallApi("GET", `/bot/${bot_id}/transcript/`);
       if (!ok) {
-        return { content: [{ type: "text", text: `Failed to get transcript: ${JSON.stringify(data)}` }] };
+        return { content: [{ type: "text", text: formatApiError("Failed to get transcript", status, data) }] };
       }
       transcript = Array.isArray(data) ? data : [];
     }
@@ -224,9 +256,18 @@ server.tool(
   },
   async ({ bot_id, text, voice }) => {
     if (isHostedMode) {
-      const { ok, data } = await groupthinApi("POST", `/bots/${bot_id}/speak`, { text, voice });
+      const { ok, status, data } = await groupthinApi("POST", `/bots/${bot_id}/speak`, { text, voice });
       if (!ok) {
-        return { content: [{ type: "text", text: `Failed to speak: ${JSON.stringify(data)}` }] };
+        // Retry once after 2s
+        await sleep(2000);
+        const retry = await groupthinApi("POST", `/bots/${bot_id}/speak`, { text, voice });
+        if (!retry.ok) {
+          return { content: [{ type: "text", text: formatApiError("Failed to speak (after retry)", retry.status, retry.data) }] };
+        }
+        const est = retry.data.estimated_duration || (text.length * 0.065).toFixed(1);
+        return {
+          content: [{ type: "text", text: `🔊 Spoke (on retry): "${text}" (est. ${est}s). Wait ${Math.ceil(parseFloat(est) + 2)}s before speaking again.` }],
+        };
       }
       const est = data.estimated_duration || (text.length * 0.065).toFixed(1);
       return {
@@ -234,30 +275,50 @@ server.tool(
       };
     }
 
-    // Direct mode: TTS + push audio
-    const ttsRes = await fetch("https://api.openai.com/v1/audio/speech", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ model: "tts-1", input: text, voice, speed: 1.0 }),
-    });
+    // Direct mode: TTS + push audio (with retry)
+    async function ttsAndPush() {
+      const ttsRes = await fetch("https://api.openai.com/v1/audio/speech", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${OPENAI_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ model: "tts-1", input: text, voice, speed: 1.0 }),
+        signal: timeoutSignal(TTS_TIMEOUT),
+      });
 
-    if (!ttsRes.ok) {
-      return { content: [{ type: "text", text: `TTS failed: ${ttsRes.status}` }] };
+      if (!ttsRes.ok) {
+        const errText = await ttsRes.text().catch(() => "");
+        throw new Error(`TTS failed: ${ttsRes.status} ${errText}`);
+      }
+
+      const audioBuffer = await ttsRes.arrayBuffer();
+      const b64Audio = Buffer.from(audioBuffer).toString("base64");
+
+      const pushRes = await recallApi("POST", `/bot/${bot_id}/output_audio/`, {
+        kind: "mp3",
+        b64_data: b64Audio,
+      });
+
+      if (!pushRes.ok) {
+        throw new Error(`Failed to push audio: ${humanRecallError(pushRes.status, pushRes.data)}`);
+      }
     }
 
-    const audioBuffer = await ttsRes.arrayBuffer();
-    const b64Audio = Buffer.from(audioBuffer).toString("base64");
-
-    const pushRes = await recallApi("POST", `/bot/${bot_id}/output_audio/`, {
-      kind: "mp3",
-      b64_data: b64Audio,
-    });
-
-    if (!pushRes.ok) {
-      return { content: [{ type: "text", text: `Failed to push audio: ${pushRes.status} ${JSON.stringify(pushRes.data)}` }] };
+    try {
+      await ttsAndPush();
+    } catch (firstErr) {
+      // Retry once after 2s
+      await sleep(2000);
+      try {
+        await ttsAndPush();
+      } catch (retryErr) {
+        return { content: [{ type: "text", text: `Failed to speak (after retry): ${retryErr.message}` }] };
+      }
+      const estimatedDuration = (text.length * 0.065).toFixed(1);
+      return {
+        content: [{ type: "text", text: `🔊 Spoke (on retry): "${text}" (est. ${estimatedDuration}s). Wait at least ${Math.ceil(parseFloat(estimatedDuration) + 2)}s before speaking again.` }],
+      };
     }
 
     const estimatedDuration = (text.length * 0.065).toFixed(1);
@@ -282,14 +343,14 @@ server.tool(
   },
   async ({ bot_id, message }) => {
     if (isHostedMode) {
-      const { ok, data } = await groupthinApi("POST", `/bots/${bot_id}/chat`, { message });
+      const { ok, status, data } = await groupthinApi("POST", `/bots/${bot_id}/chat`, { message });
       if (!ok) {
-        return { content: [{ type: "text", text: `Failed to send chat: ${JSON.stringify(data)}` }] };
+        return { content: [{ type: "text", text: formatApiError("Failed to send chat", status, data) }] };
       }
     } else {
-      const { ok, data } = await recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message });
+      const { ok, status, data } = await recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message });
       if (!ok) {
-        return { content: [{ type: "text", text: `Failed to send chat: ${JSON.stringify(data)}` }] };
+        return { content: [{ type: "text", text: formatApiError("Failed to send chat", status, data) }] };
       }
     }
 
@@ -305,10 +366,14 @@ server.tool(
     bot_id: z.string().describe("The bot ID returned from join_meeting"),
   },
   async ({ bot_id }) => {
-    if (isHostedMode) {
-      await groupthinApi("POST", `/bots/${bot_id}/leave`);
-    } else {
-      await recallApi("POST", `/bot/${bot_id}/leave_call/`);
+    try {
+      if (isHostedMode) {
+        await groupthinApi("POST", `/bots/${bot_id}/leave`);
+      } else {
+        await recallApi("POST", `/bot/${bot_id}/leave_call/`);
+      }
+    } catch (err) {
+      // Best-effort — bot may already be gone
     }
 
     activeBots.delete(bot_id);
@@ -325,9 +390,9 @@ server.tool(
   },
   async ({ bot_id }) => {
     if (isHostedMode) {
-      const { ok, data } = await groupthinApi("GET", `/bots/${bot_id}/status`);
+      const { ok, status, data } = await groupthinApi("GET", `/bots/${bot_id}/status`);
       if (!ok) {
-        return { content: [{ type: "text", text: `Failed to check status: ${JSON.stringify(data)}` }] };
+        return { content: [{ type: "text", text: formatApiError("Failed to check status", status, data) }] };
       }
       return {
         content: [
@@ -339,9 +404,9 @@ server.tool(
       };
     }
 
-    const { ok, data } = await recallApi("GET", `/bot/${bot_id}/`);
+    const { ok, status, data } = await recallApi("GET", `/bot/${bot_id}/`);
     if (!ok) {
-      return { content: [{ type: "text", text: `Failed to check status: ${JSON.stringify(data)}` }] };
+      return { content: [{ type: "text", text: formatApiError("Failed to check status", status, data) }] };
     }
 
     const statuses = data.status_changes || [];
@@ -358,125 +423,79 @@ server.tool(
   }
 );
 
-// ── raise_hand ────────────────────────────────────────────────────────────────
+// ── check_connection ──────────────────────────────────────────────────────────
 server.tool(
-  "raise_hand",
-  "Signal that you want to speak by posting a visual indicator in the meeting chat. Use when you have something to contribute but don't want to interrupt.",
-  {
-    bot_id: z.string().describe("The bot ID returned from join_meeting"),
-    topic: z.string().optional().describe("Brief topic you want to discuss (optional)"),
-  },
-  async ({ bot_id, topic }) => {
-    const bot = activeBots.get(bot_id);
-    const name = bot?.name || "Agent";
-    const message = topic
-      ? `✋ ${name} wants to speak about: ${topic}`
-      : `✋ ${name} wants to speak`;
+  "check_connection",
+  "Verify that API credentials are valid without creating a bot. Use for setup verification.",
+  {},
+  async () => {
+    const results = [];
 
     if (isHostedMode) {
-      await groupthinApi("POST", `/bots/${bot_id}/chat`, { message });
+      try {
+        const { ok, status } = await groupthinApi("GET", "/bots");
+        results.push(ok
+          ? "✅ Groupthink API: connected"
+          : `❌ Groupthink API: ${humanRecallError(status, {})}`);
+      } catch (err) {
+        results.push(`❌ Groupthink API: ${err.message}`);
+      }
     } else {
-      await recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message });
+      // Check Recall
+      try {
+        const { ok, status } = await recallApi("GET", "/bot/?limit=1");
+        results.push(ok
+          ? "✅ Recall.ai API: connected"
+          : `❌ Recall.ai API: ${humanRecallError(status, {})}`);
+      } catch (err) {
+        results.push(`❌ Recall.ai API: ${err.message}`);
+      }
+
+      // Check OpenAI — lightweight models list call
+      try {
+        const res = await fetch("https://api.openai.com/v1/models?limit=1", {
+          headers: { Authorization: `Bearer ${OPENAI_KEY}` },
+          signal: timeoutSignal(RECALL_TIMEOUT),
+        });
+        results.push(res.ok
+          ? "✅ OpenAI API: connected"
+          : `❌ OpenAI API: ${res.status} — check your OPENAI_KEY`);
+      } catch (err) {
+        results.push(`❌ OpenAI API: ${err.message}`);
+      }
     }
 
-    return { content: [{ type: "text", text: `✋ Hand raised${topic ? `: "${topic}"` : ""}. Posted in meeting chat.` }] };
+    results.push(`\nMode: ${isHostedMode ? "Groupthink hosted" : "Direct (self-hosted)"}`);
+    results.push(`Active bots: ${activeBots.size}`);
+
+    return { content: [{ type: "text", text: results.join("\n") }] };
   }
 );
 
-// ── catch_up ──────────────────────────────────────────────────────────────────
-server.tool(
-  "catch_up",
-  "Get a summary of everything discussed in the meeting so far. Use when you join late or need to recap what happened.",
-  {
-    bot_id: z.string().describe("The bot ID returned from join_meeting"),
-  },
-  async ({ bot_id }) => {
-    let transcript;
+// ── Graceful shutdown: clean up active bots ──────────────────────────────────
+async function gracefulShutdown() {
+  if (activeBots.size === 0) process.exit(0);
 
-    if (isHostedMode) {
-      const { ok, data } = await groupthinApi("GET", `/bots/${bot_id}/transcript`);
-      if (!ok) {
-        return { content: [{ type: "text", text: `Failed to get transcript for catch-up.` }] };
+  console.error(`Shutting down — removing ${activeBots.size} active bot(s) from meetings...`);
+
+  const leavePromises = [...activeBots.keys()].map(async (botId) => {
+    try {
+      if (isHostedMode) {
+        await groupthinApi("POST", `/bots/${botId}/leave`);
+      } else {
+        await recallApi("POST", `/bot/${botId}/leave_call/`);
       }
-      transcript = Array.isArray(data) ? data : data.transcript || [];
-    } else {
-      const { ok, data } = await recallApi("GET", `/bot/${bot_id}/transcript/`);
-      if (!ok) {
-        return { content: [{ type: "text", text: `Failed to get transcript for catch-up.` }] };
-      }
-      transcript = Array.isArray(data) ? data : [];
+    } catch {
+      // Best-effort cleanup
     }
+  });
 
-    if (transcript.length === 0) {
-      return { content: [{ type: "text", text: "No transcript yet — the meeting may have just started or the bot isn't recording yet." }] };
-    }
+  await Promise.allSettled(leavePromises);
+  process.exit(0);
+}
 
-    // Format full transcript for the agent to summarize
-    const lines = transcript.map((entry) => {
-      const speaker = entry.speaker || "Unknown";
-      const text = entry.words?.map((w) => w.text).join(" ") || "";
-      return `${speaker}: ${text}`;
-    });
-
-    // Update cursor so get_transcript doesn't repeat these
-    const bot = activeBots.get(bot_id);
-    if (bot) {
-      const last = transcript[transcript.length - 1];
-      const lastWord = last.words?.[last.words.length - 1];
-      if (lastWord) {
-        bot.lastTranscriptTs = lastWord.end_timestamp;
-      }
-    }
-
-    const totalMinutes = transcript.length > 0
-      ? ((transcript[transcript.length - 1].words?.slice(-1)[0]?.end_timestamp || 0) / 60).toFixed(1)
-      : "0";
-
-    return {
-      content: [
-        {
-          type: "text",
-          text: `📋 Meeting transcript so far (${totalMinutes} min, ${transcript.length} segments):\n\n${lines.join("\n")}\n\nUse this to understand context. Summarize for yourself, then participate.`,
-        },
-      ],
-    };
-  }
-);
-
-// ── save_notes ────────────────────────────────────────────────────────────────
-server.tool(
-  "save_notes",
-  "Save your meeting notes and observations. Call this before leaving to persist what you learned.",
-  {
-    bot_id: z.string().describe("The bot ID returned from join_meeting"),
-    summary: z.string().describe("Your summary of the meeting"),
-    action_items: z.array(z.string()).optional().describe("Action items you identified"),
-    key_decisions: z.array(z.string()).optional().describe("Key decisions that were made"),
-  },
-  async ({ bot_id, summary, action_items, key_decisions }) => {
-    if (isHostedMode) {
-      const { ok, data } = await groupthinApi("POST", `/bots/${bot_id}/notes`, {
-        summary,
-        action_items: action_items || [],
-        key_decisions: key_decisions || [],
-      });
-      if (!ok) {
-        // Fallback: post in chat if API doesn't support notes yet
-        const noteText = `📝 Meeting Notes:\n${summary}${action_items?.length ? "\n\nAction Items:\n" + action_items.map((i) => `• ${i}`).join("\n") : ""}${key_decisions?.length ? "\n\nDecisions:\n" + key_decisions.map((d) => `• ${d}`).join("\n") : ""}`;
-        await (isHostedMode
-          ? groupthinApi("POST", `/bots/${bot_id}/chat`, { message: noteText })
-          : recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message: noteText }));
-        return { content: [{ type: "text", text: `📝 Notes saved to meeting chat (API notes endpoint not available yet).` }] };
-      }
-      return { content: [{ type: "text", text: `📝 Notes saved! Summary: "${summary.substring(0, 80)}..."` }] };
-    }
-
-    // Self-hosted: post notes in meeting chat
-    const noteText = `📝 Meeting Notes:\n${summary}${action_items?.length ? "\n\nAction Items:\n" + action_items.map((i) => `• ${i}`).join("\n") : ""}${key_decisions?.length ? "\n\nDecisions:\n" + key_decisions.map((d) => `• ${d}`).join("\n") : ""}`;
-    await recallApi("POST", `/bot/${bot_id}/send_chat_message/`, { message: noteText });
-    return { content: [{ type: "text", text: `📝 Notes posted in meeting chat.` }] };
-  }
-);
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGTERM", gracefulShutdown);
 
 // ── Start server ──────────────────────────────────────────────────────────────
 const transport = new StdioServerTransport();
