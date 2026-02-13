@@ -66,9 +66,28 @@ async function main() {
 async function groupthinkSetup() {
   console.log("");
   console.log("Log in with your Groupthink account.");
-  console.log(`API: ${GROUPTHINK_API}`);
   console.log("");
 
+  const hasAccount = await ask("Do you have a Groupthink account? (Y/n): ");
+  if (hasAccount.trim().toLowerCase() === "n") {
+    console.log("");
+    console.log("┌─────────────────────────────────────────────────────────┐");
+    console.log("│                                                         │");
+    console.log("│  Create your free account at:                           │");
+    console.log("│                                                         │");
+    console.log("│    👉  https://app.groupthink.com/register              │");
+    console.log("│                                                         │");
+    console.log("│  Once you've signed up, run this setup again:           │");
+    console.log("│                                                         │");
+    console.log("│    node setup.js                                        │");
+    console.log("│                                                         │");
+    console.log("└─────────────────────────────────────────────────────────┘");
+    console.log("");
+    rl.close();
+    return;
+  }
+
+  console.log("");
   const email = await ask("Email: ");
   const password = await askHidden("Password: ");
 
@@ -92,6 +111,9 @@ async function groupthinkSetup() {
       const body = await res.text();
       if (res.status === 401 || res.status === 422) {
         console.log("❌ Invalid email or password.");
+        console.log("");
+        console.log("   Forgot your password?  https://app.groupthink.com/forgot-password");
+        console.log("   Need an account?       https://app.groupthink.com/register");
       } else {
         console.log(`❌ Authentication failed: ${res.status} ${body}`);
       }
