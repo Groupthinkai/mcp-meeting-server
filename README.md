@@ -60,7 +60,7 @@ The agent has full context from your coding session — it knows what files you'
 
 Each brings its own project context. Each has a separate voice and identity in the meeting.
 
-## Tools
+## Tools (9 total)
 
 | Tool | What it does |
 |------|-------------|
@@ -70,7 +70,9 @@ Each brings its own project context. Each has a separate voice and identity in t
 | `send_chat` | Post a message in the meeting chat |
 | `raise_hand` | Signal you want to speak (posts ✋ in chat) |
 | `catch_up` | Get full transcript so far (for late joiners) |
-| `save_notes` | Save meeting notes, action items, and decisions |
+| `check_connection` | Verify API credentials are valid without creating a bot |
+| `save_notes` | Save structured meeting notes (summary, action items, key topics, sentiment, raw notes) |
+| `get_notes` | Retrieve saved notes for the current bot session |
 | `bot_status` | Check if the bot has been admitted |
 | `leave_meeting` | Remove the bot from the meeting |
 
@@ -108,7 +110,10 @@ Each brings its own project context. Each has a separate voice and identity in t
 
 **Claude Code** is the brain — it decides when to listen and what to say, using its full session context.
 
-**This MCP server** translates tool calls into Groupthink API requests.
+**This MCP server** translates tool calls into Groupthink API requests. It includes built-in reliability features:
+- **Request timeouts** — 30s for API calls, 60s for TTS generation
+- **Automatic retries** — speech delivery retries on transient failures
+- **Graceful shutdown** — active bots are automatically removed from meetings on exit (SIGINT/SIGTERM)
 
 **Groupthink** handles bot management, voice synthesis, and billing.
 
