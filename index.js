@@ -27,6 +27,31 @@ if (!isHostedMode && !isDirectMode) {
 // Track active bots and transcript cursors
 const activeBots = new Map();
 
+// Local notes storage for self-hosted mode
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const NOTES_DIR = join(__dirname, ".notes");
+
+function getLocalNotesPath(botId) {
+  return join(NOTES_DIR, `${botId}.json`);
+}
+
+function readLocalNotes(botId) {
+  try {
+    return JSON.parse(readFileSync(getLocalNotesPath(botId), "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeLocalNotes(botId, notes) {
+  mkdirSync(NOTES_DIR, { recursive: true });
+  writeFileSync(getLocalNotesPath(botId), JSON.stringify(notes, null, 2));
+}
+
 const server = new McpServer({
   name: "groupthink-meeting",
   version: "0.2.0",
@@ -469,6 +494,60 @@ server.tool(
     results.push(`Active bots: ${activeBots.size}`);
 
     return { content: [{ type: "text", text: results.join("\n") }] };
+  }
+);
+
+// ── save_notes ────────────────────────────────────────────────────────────────
+server.tool(
+  "save_notes",
+  "Save structured meeting notes (summary, action items, topics, sentiment) for the current bot session",
+  {
+    bot_id: z.string().describe("The bot ID returned from join_meeting"),
+    summary: z.string().describe("Summary of the meeting so far"),
+    action_items: z.array(z.string()).default([]).describe("List of action items identified"),
+    key_topics: z.array(z.string()).default([]).describe("Key topics discussed"),
+    sentiment: z.string().default("neutral").describe("Overall meeting sentiment (e.g. positive, neutral, negative, mixed)"),
+    raw_notes: z.string().default("").describe("Freeform raw notes or additional context"),
+  },
+  async ({ bot_id, summary, action_items, key_topics, sentiment, raw_notes }) => {
+    const body = { summary, action_items, key_topics, sentiment, raw_notes };
+
+    if (isHostedMode) {
+      const { ok, status, data } = await groupthinApi("POST", `/bots/${bot_id}/notes`, body);
+      if (!ok) {
+        return { content: [{ type: "text", text: formatApiError("Failed to save notes", status, data) }] };
+      }
+      return { content: [{ type: "text", text: `📝 Notes saved for bot ${bot_id}.` }] };
+    }
+
+    // Self-hosted: store locally
+    writeLocalNotes(bot_id, { ...body, updated_at: new Date().toISOString() });
+    return { content: [{ type: "text", text: `📝 Notes saved locally for bot ${bot_id}.` }] };
+  }
+);
+
+// ── get_notes ─────────────────────────────────────────────────────────────────
+server.tool(
+  "get_notes",
+  "Retrieve saved meeting notes for a bot session",
+  {
+    bot_id: z.string().describe("The bot ID returned from join_meeting"),
+  },
+  async ({ bot_id }) => {
+    if (isHostedMode) {
+      const { ok, status, data } = await groupthinApi("GET", `/bots/${bot_id}/notes`);
+      if (!ok) {
+        return { content: [{ type: "text", text: formatApiError("Failed to get notes", status, data) }] };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+
+    // Self-hosted: read local
+    const notes = readLocalNotes(bot_id);
+    if (!notes) {
+      return { content: [{ type: "text", text: `No notes found for bot ${bot_id}. Use save_notes first.` }] };
+    }
+    return { content: [{ type: "text", text: JSON.stringify(notes, null, 2) }] };
   }
 );
 
