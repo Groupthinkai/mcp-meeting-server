@@ -351,7 +351,7 @@ server.tool(
       content: [
         {
           type: "text",
-          text: `Bot "${data.bot_name}" — Status: ${latest?.code || "unknown"}\nMeeting: ${data.meeting_url}\nCreated: ${data.created_at}`,
+          text: `Bot "${data.bot_name}" — Status: ${latest?.code || "unknown"}\nMeeting: ${typeof data.meeting_url === 'string' ? data.meeting_url : JSON.stringify(data.meeting_url)}\nCreated: ${data.created_at}`,
         },
       ],
     };
