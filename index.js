@@ -156,10 +156,15 @@ server.tool(
         bot_name,
         meeting_url: url,
         transcription_options: { provider: "deepgram" },
-        real_time_transcription: {
-          destination_url: (process.env.RECALL_WEBHOOK_URL || "https://groupthink-elle.ngrok.app/webhooks/v1/recall") + "/transcription",
-          partial_results: false,
-        },
+        // Real-time transcription via webhook is opt-in. If RECALL_WEBHOOK_URL
+        // is set, the bot streams transcripts to that endpoint. If unset, we
+        // fall back to polling. No third party's tunnel gets traffic.
+        ...(process.env.RECALL_WEBHOOK_URL && {
+          real_time_transcription: {
+            destination_url: process.env.RECALL_WEBHOOK_URL + "/transcription",
+            partial_results: false,
+          },
+        }),
         chat: {
           on_bot_join: {
             send_to: "everyone",
