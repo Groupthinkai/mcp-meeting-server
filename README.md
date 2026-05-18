@@ -1,5 +1,19 @@
 # Groupthink Meeting MCP Server
 
+> [!WARNING]
+> **This repository is archived and superseded.** As of 2026-05-17, Groupthink runs a single hosted MCP server at `https://api.groupthink.com/v1/mcp-server` that includes everything this stdio server did (`join_meeting`, `get_transcript`, `speak`, `send_chat`, `bot_status`, `leave_meeting`, `save_notes`, `get_notes`), plus relationship-intelligence read tools and a `upsert_relationship_note` write-back tool. The hosted server requires no local install or `recall.ai`/`openai` keys.
+>
+> **Set up the new server:** [groupthink.com/docs/mcp_server](https://groupthink.com/docs/mcp_server)
+>
+> **Already using this repo?** Migrate in two steps:
+>
+> 1. Remove the legacy entry. In Claude Code: `claude mcp remove groupthink-meeting`. In Claude Desktop or Cursor: remove the `groupthink-meeting` entry from your `claude_desktop_config.json` or Cursor MCP settings.
+> 2. Mint a token at [app.groupthink.com/settings#api-tokens](https://app.groupthink.com/settings#api-tokens) and follow the new docs to add the hosted server.
+>
+> The content below is preserved for historical reference and link compatibility. Issues and pull requests are no longer accepted.
+
+---
+
 Give any AI coding agent a seat at your meeting.
 
 Connect your Claude Code session to a live Google Meet, Zoom, or Teams call. The agent joins as a named participant who can listen, speak, and post in chat — with full context from whatever it's been working on.
